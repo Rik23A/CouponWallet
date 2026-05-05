@@ -14,7 +14,7 @@ const app  = express();
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 
 // ── Request Logger ────────────────────────────────────────────────────────────
-app.use((req, _res, next) => {
+app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
@@ -49,7 +49,7 @@ app.use('/api/parse',      parseRouter);
 app.use('/api/community',  communityRouter);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
-app.use((_req, res) => {
+app.use((_req: express.Request, res: express.Response) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
