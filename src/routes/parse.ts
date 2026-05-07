@@ -1,6 +1,6 @@
 // CouponVault Server — /api/parse route
 import { Router, Request, Response } from 'express';
-import { extractCouponFromOCR } from '../lib/gemini';
+import { extractCouponsFromOCR, GeminiParsedCoupon } from '../lib/gemini';
 import { parseLocally } from '../lib/localParser';
 import { findOne, findMany } from '../lib/mongo';
 
@@ -18,123 +18,142 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
   }
 
   // ── Step 1: DB-First Lookup (Short-circuit expensive AI) ──────────────────
+  let dbCoupons: any[] = [];
+  let potentialCodes: string[] = [];
+
   try {
-    // Extract potential uppercase codes (4-30 chars, including hyphens/underscores)
-    const potentialCodes = Array.from(new Set(
-      ocrText.match(/[A-Z0-9\-_]{4,30}/g) || []
+    // Use the same heuristic as the mobile client:
+    //   ─ Alphanumeric tokens, optionally hyphen-separated (e.g. LSBB100-3W3GR8HRAZJBW6P)
+    //   ─ Mixed-case — preserve original, uppercase only for heuristic checks
+    //   ─ Exclude pure date tokens (JAN2024, MAR25 etc.)
+    const DATE_MONTH_RE = /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{1,4}$/i;
+    // Regex: letter start, then any alphanumeric, with optional internal hyphen segments
+    const rawTokens = ocrText.match(/\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\b/g) ?? [];
+    potentialCodes = Array.from(new Set(
+      rawTokens.filter(t => {
+        const stripped = t.replace(/-/g, '');        // remove hyphens for length/char checks
+        const upper    = stripped.toUpperCase();
+        if (upper.length < 5 || upper.length > 40) return false;
+        if (DATE_MONTH_RE.test(upper)) return false;
+        const letters = (upper.match(/[A-Z]/g) ?? []).length;
+        const digits  = (upper.match(/[0-9]/g) ?? []).length;
+        return letters >= 2 && digits >= 1;           // Must be mixed alphanumeric
+      })
     ));
 
     if (potentialCodes.length > 0) {
-      // Find active coupons matching any of these codes
       const candidates = await findMany<any>(COUPONS_COL, {
-        coupon_code: { $in: potentialCodes },
+        coupon_code: { $in: potentialCodes.map(c => c.toUpperCase()) },
         is_active:   true,
       });
 
-      // Verify if the brand name also exists in the OCR text to avoid false positives
       for (const cand of candidates) {
+        // Extra guard: brand name must also appear in OCR text
         const brandName = cand.brand_name.toLowerCase();
         if (ocrText.toLowerCase().includes(brandName)) {
-          console.log(`[Parse DB] Short-circuit hit: ${cand.brand_name} - ${cand.coupon_code}`);
-          
-          res.json({
-            success: true,
-            fromCommunityDB: true,
-            coupon: {
-              couponCode:     cand.coupon_code,
-              brandName:      cand.brand_name,
-              category:       cand.category,
-              discountText:   cand.discount_text,
-              discountAmount: cand.discount_value,
-              discountType:   cand.discount_type,
-              minOrderAmount: cand.min_order,
-              maxDiscountCap: cand.max_discount,
-              expiryDate:     cand.expiry_date,
-              packageName:    cand.package_name,
-              termsAndConditions: cand.terms_and_conditions || '',
-              confidence:     1.0,
-            },
-            message: 'Fetched from community vault',
+          dbCoupons.push({
+            couponCode:         cand.coupon_code,
+            brandName:          cand.brand_name,
+            category:           cand.category,
+            discountText:       cand.discount_text,
+            discountAmount:     cand.discount_value,
+            discountType:       cand.discount_type,
+            minOrderAmount:     cand.min_order,
+            maxDiscountCap:     cand.max_discount,
+            expiryDate:         cand.expiry_date,
+            packageName:        cand.package_name,
+            termsAndConditions: cand.terms_and_conditions || '',
+            confidence:         1.0,
+            fromCommunityDB:    true,
           });
-          return;
         }
       }
     }
   } catch (dbErr) {
     console.error('[Parse DB] Lookup error:', dbErr);
-    // Continue to AI if DB lookup fails
   }
 
-  // ── Step 2: Gemini AI Extraction (Primary Engine) ─────────────────────────
-  let coupon = await extractCouponFromOCR(ocrText);
+  // ── Step 2: Gemini AI Extraction (only when DB doesn't fully cover OCR) ───
+  //
+  // "Full coverage" = every strict coupon-code candidate found in the OCR is
+  // already present in the community DB results. In that case there is nothing
+  // new for Gemini to discover — skip the API call entirely.
+  //
+  const dbCodeSet = new Set(dbCoupons.map(c => c.couponCode.toUpperCase()));
 
-  if (!coupon) {
-    console.warn('[Parse AI] Gemini failed or quota exceeded. Falling back to local regex parser.');
+  // "Full coverage" = DB found results AND every "meaningful" uncovered token
+  // is short enough to be OCR noise (< 7 alphanumeric chars without hyphens).
+  // e.g. "Rlul87" (6 chars) is noise; "LSBB100-3W3GR8HRAZJBW6P" (21 alphanum) is real.
+  const uncoveredMeaningful = potentialCodes.filter(c => {
+    if (dbCodeSet.has(c.toUpperCase())) return false;          // already in DB
+    const alphanum = c.replace(/-/g, '').toUpperCase();
+    return alphanum.length >= 7;                               // short = noise, long = real new code
+  });
+  const allCovered = dbCoupons.length > 0 && uncoveredMeaningful.length === 0;
+
+  let extractedCoupons: GeminiParsedCoupon[] = [];
+
+  if (allCovered) {
+    // ✅ DB has everything — skip Gemini
+    console.log(`[Parse] Full DB coverage for ${dbCoupons.length} coupon(s) — Gemini skipped.`);
+  } else {
+    // 🔄 Unknown codes present — call Gemini
+    const uncoveredCodes = potentialCodes.filter(c => !dbCodeSet.has(c.toUpperCase()));
+    console.log(`[Parse] ${uncoveredCodes.length} code(s) not in DB (${uncoveredCodes.join(', ')}) — calling Gemini.`);
+    extractedCoupons = await extractCouponsFromOCR(ocrText);
+  }
+
+  // Fallback to local parser ONLY if AI found absolutely nothing and we have no DB hits
+  if (extractedCoupons.length === 0 && dbCoupons.length === 0) {
+    console.warn('[Parse AI] Gemini found nothing. Falling back to local regex parser.');
     const localResult = parseLocally(ocrText);
-    
-    // Map local result to the same interface
-    coupon = {
-      couponCode:     localResult.couponCode || null,
-      brandName:      localResult.brandName,
-      category:       localResult.category,
-      discountText:   localResult.discountText || 'Discount Found',
-      discountAmount: localResult.discountValue,
-      discountType:   localResult.discountType,
-      minOrderAmount: localResult.minOrder,
-      maxDiscountCap: localResult.maxDiscount,
-      expiryDate:     localResult.expiryDate,
-      termsAndConditions: null,
-      confidence:     localResult.confidence * 0.8, // Lower confidence for local fallback
-    };
+    if (localResult.couponCode) {
+      extractedCoupons.push({
+        couponCode:     localResult.couponCode,
+        brandName:      localResult.brandName,
+        category:       localResult.category,
+        discountText:   localResult.discountText || 'Discount Found',
+        discountAmount: localResult.discountValue,
+        discountType:   localResult.discountType,
+        minOrderAmount: localResult.minOrder,
+        maxDiscountCap: localResult.maxDiscount,
+        expiryDate:     localResult.expiryDate,
+        termsAndConditions: null,
+        confidence:     localResult.confidence * 0.8,
+      });
+    }
   }
 
-  if (!coupon || (!coupon.couponCode && (coupon.confidence || 0) < 0.2)) {
-    res.status(500).json({ error: 'AI extraction failed and local parser found nothing useful' });
-    return;
-  }
+  // Filter out low-confidence or invalid AI extractions
+  const validExtracted = extractedCoupons.filter(c => c.couponCode && c.confidence > 0.2);
 
-  // Validate minimum required fields per user logic
-  if (!coupon.couponCode && coupon.confidence < 0.3) {
-    res.json({
-      success: false,
-      message: 'Could not extract coupon — please fill manually',
-      coupon: coupon,
-    });
-    return;
-  }
+  // ── Step 3: Merge & De-duplicate ──────────────────────────────────────────
+  // Prefer DB records over AI extractions for the same code
+  const finalCouponsMap = new Map<string, any>();
 
-  // ── Step 3: Final check/merge (in case AI found it but we didn't in short-circuit) ──
-  let existing = null;
-  if (coupon && coupon.couponCode) {
-    existing = await findOne<any>(COUPONS_COL, {
-      coupon_code: coupon.couponCode.toUpperCase(),
-      brand_name:  coupon.brandName,
-      is_active:   true,
-    });
-  }
+  // Add AI ones first (lower authority)
+  validExtracted.forEach(c => {
+    const key = `${c.brandName.toLowerCase()}_${c.couponCode?.toUpperCase()}`;
+    finalCouponsMap.set(key, c);
+  });
 
-  console.log(`[Parse AI] Success: ${coupon.brandName} - ${coupon.couponCode} (Conf: ${coupon.confidence})`);
-  
+  // Overwrite with DB ones (community-verified, higher authority)
+  dbCoupons.forEach(c => {
+    const key = `${c.brandName.toLowerCase()}_${c.couponCode?.toUpperCase()}`;
+    finalCouponsMap.set(key, c);
+  });
+
+  const finalCoupons = Array.from(finalCouponsMap.values());
+
+  console.log(`[Parse] Returning ${finalCoupons.length} coupon(s): ${dbCoupons.length} from DB, ${validExtracted.length} from Gemini.`);
+
   res.json({
-    success: true,
-    fromCommunityDB: !!existing,
-    coupon: existing ? {
-      couponCode:     existing.coupon_code,
-      brandName:      existing.brand_name,
-      category:       existing.category,
-      discountText:   existing.discount_text,
-      discountAmount: existing.discount_value,
-      discountType:   existing.discount_type,
-      minOrderAmount: existing.min_order,
-      maxDiscountCap: existing.max_discount,
-      expiryDate:     existing.expiry_date,
-      packageName:    existing.package_name,
-      termsAndConditions: existing.terms_and_conditions || '',
-      confidence:     1.0,
-    } : coupon,
-    aiExtracted: coupon,
-    confidence: coupon.confidence,
+    success: finalCoupons.length > 0,
+    coupons: finalCoupons,
+    count:   finalCoupons.length,
+    message: finalCoupons.length > 0 ? `Found ${finalCoupons.length} coupons` : 'No coupons found',
   });
 });
+
 
 export default router;
