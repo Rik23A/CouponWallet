@@ -118,6 +118,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
         minOrderAmount: localResult.minOrder,
         maxDiscountCap: localResult.maxDiscount,
         expiryDate:     localResult.expiryDate,
+        packageName:    null,
         termsAndConditions: null,
         confidence:     localResult.confidence * 0.8,
       });
