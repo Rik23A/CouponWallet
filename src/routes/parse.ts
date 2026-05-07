@@ -125,8 +125,8 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
     }
   }
 
-  // Filter out low-confidence or invalid AI extractions
-  const validExtracted = extractedCoupons.filter(c => c.couponCode && c.confidence > 0.2);
+  // Filter out low-confidence extractions (allowing code-less coupons)
+  const validExtracted = extractedCoupons.filter(c => c.confidence > 0.2);
 
   // ── Step 3: Merge & De-duplicate ──────────────────────────────────────────
   // Prefer DB records over AI extractions for the same code

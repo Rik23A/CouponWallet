@@ -3,6 +3,21 @@
 
 // ── Brand detection ───────────────────────────────────────────────────────────
 const BRAND_MAP: Array<{ keys: string[]; brand: string; category: string }> = [
+  { keys: ['axis bank', 'axisbank', 'axis card', 'axis neo'], brand: 'Axis Bank', category: 'Payments' },
+  { keys: ['hdfc bank', 'hdfc card', 'hdfcbank', 'regalia', 'diners club'], brand: 'HDFC Bank', category: 'Payments' },
+  { keys: ['icici bank', 'icici card', 'icicibank', 'amazon pay icici', 'coral card'], brand: 'ICICI Bank', category: 'Payments' },
+  { keys: ['sbi card', 'sbi bank', 'sbicard', 'sbi pulse'], brand: 'SBI Card', category: 'Payments' },
+  { keys: ['kotak bank', 'kotak card', 'kotakbank', 'kotak league'], brand: 'Kotak Mahindra Bank', category: 'Payments' },
+  { keys: ['idfc bank', 'idfc first', 'idfc card'], brand: 'IDFC FIRST Bank', category: 'Payments' },
+  { keys: ['rbl bank', 'rbl card'], brand: 'RBL Bank', category: 'Payments' },
+  { keys: ['yes bank', 'yes card'], brand: 'Yes Bank', category: 'Payments' },
+  { keys: ['indusind bank', 'indusind card'], brand: 'IndusInd Bank', category: 'Payments' },
+  { keys: ['amex', 'american express'], brand: 'American Express', category: 'Payments' },
+  { keys: ['hsbc'], brand: 'HSBC', category: 'Payments' },
+  { keys: ['federal bank'], brand: 'Federal Bank', category: 'Payments' },
+  { keys: ['sc bank', 'standard chartered'], brand: 'Standard Chartered', category: 'Payments' },
+  { keys: ['bob card', 'bank of baroda'], brand: 'Bank of Baroda', category: 'Payments' },
+  { keys: ['au bank', 'au small finance'], brand: 'AU Small Finance Bank', category: 'Payments' },
   { keys: ['swiggy', 'instamart', 'dineout'], brand: 'Swiggy', category: 'Food' },
   { keys: ['zomato', 'district'], brand: 'Zomato', category: 'Food' },
   { keys: ['bigbasket', 'big basket'], brand: 'BigBasket', category: 'Grocery' },

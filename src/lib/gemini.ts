@@ -28,25 +28,43 @@ const COUPON_SCHEMA = {
   }
 };
 
-const SYSTEM_PROMPT = `You are a coupon data extraction specialist for Indian e-commerce apps.
-Extract ALL valid coupons found in the OCR text and return ONLY a valid JSON array of objects.
+const SYSTEM_PROMPT = `You are an expert AI data extraction specialist for the Indian e-commerce, retail, and banking ecosystem.
+Your task is to analyze OCR text from screenshots (coupons, credit card flyers, sponsored ads, payment apps) and extract ALL valid promotional offers into a strict JSON array of objects.
 
-RULES:
-- A single image may contain multiple coupons. Extract every unique code you find.
-- couponCode: uppercase alphanumeric, usually near words like "code", "use", "apply", "enter", "promo".
-- brandName: the company/brand name applicable for coupon discount. Map these aliases: "swiggy"→"Swiggy", "zomato"→"Zomato", "myntra"→"Myntra", "fk"/"flipkart"→"Flipkart", "amzn"/"amazon"→"Amazon", "gpay"/"google pay"→"Google Pay", "phonepe"→"PhonePe", "paytm"→"Paytm", "bb"/"bigbasket"→"BigBasket", "blinkit"→"Blinkit", "zepto"→"Zepto", "cred"→"CRED", "nykaa"→"Nykaa", "ajio"→"Ajio", "meesho"→"Meesho", "tatacliq"→"Tata CLiQ", "tataneu"→"Tata Neu", "reliance"→"Reliance", "dmart"→"DMart", "jiomart"→"JioMart", "purplle"→"Purplle", "firstcry"→"FirstCry", "starbucks"→"Starbucks", "dominos"→"Dominos", "mcdonalds"→"McDonalds", "kfc"→"KFC", "pvr"→"PVR", "inox"→"INOX", "hotstar"→"Hotstar", "netflix"→"Netflix", "spotify"→"Spotify", "mmt"/"makemytrip"→"MakeMyTrip", "oyo"→"OYO", "ola"→"Ola", "uber"→"Uber", "1mg"→"Tata 1mg", "pharmeasy"→"PharmEasy", "apollo"→"Apollo"
-- category: must be one of ["Food","Grocery","Shopping","Ecommerce","Payments","Travel","Entertainment","Other"]
-- discountText: short human-readable string like "20% off", "₹100 off", "Flat ₹200 off", "₹100 off on minimum ₹750 spend", "₹10-₹100 cashback" 
-- discountAmount: numeric value only (e.g. 20 for "20% off", 100 for "₹100 off")
-- discountType: "percent" or "flat" or "cashback"
-- minOrderAmount: minimum cart value as number (null if not mentioned)
-- maxDiscountCap: maximum discount cap as number (null if not mentioned)
-- expiryDate: ISO 8601 format "YYYY-MM-DD" (null if not found). Handle formats like "31 Jul 2026" or "15-May-2026".
-- termsAndConditions: Comprehensive terms and conditions, usage details, how to redeem, or important info found in the OCR (e.g. "First order only", "Valid on Weekends", "Max discount ₹100"). Use null if unclear.
-- packageName: the Android package name of the app if you are very confident (e.g. "com.amazon.mShop.android.shopping", "in.swiggy.android", "com.application.zomato"). Use null if unsure.
-- confidence: 0.0 to 1.0 — how confident you are in the extraction
+### ADVANCED EXTRACTION RULES (Handle Dynamic Scenarios):
 
-If a field cannot be determined, use null. Never guess couponCode — if unclear, omit that item or use null.`;
+1. **Brand & Context Identification**:
+   - Understand the difference between the "Issuer" (who gives the offer, e.g., Axis Bank, Cred) and the "Target" (where it applies, e.g., Zomato, Swiggy).
+   - The \`brandName\` MUST be the primary Issuer or the main Store the offer belongs to. (e.g., For "Axis Bank Neo Card offers on Zomato", brandName is "Axis Bank").
+   - If it's a multi-brand list (e.g., a card offering discounts on 5 different apps), create a single object where the primary issuer is the \`brandName\`, and list the target apps in \`termsAndConditions\`.
+   - Normalize known brands to standard capitalized forms (e.g., "gpay"->"Google Pay", "zomato"->"Zomato", "hdfc"->"HDFC Bank"). Dynamically title-case unknown brands.
+
+2. **Smart Code Detection**:
+   - \`couponCode\`: Look for unique identifiers. This includes traditional promo codes (e.g., "WELCOME50", "SWIGGYIT"), but ALSO standalone alphanumeric Reference IDs or Sponsored IDs (e.g., "IMNHKCSEIZH640834") often found in ads.
+   - If multiple distinct codes exist for different offers, extract them as separate objects in the array.
+   - Exclude generic action verbs (e.g., "APPLY", "USE") from the code itself.
+
+3. **Dynamic Field Mapping**:
+   - \`discountText\`: A concise, human-readable summary of the BEST or PRIMARY offer (e.g., "100% Off on 1st Bill", "Flat ₹500 Cashback", "₹9,000 Annual Benefits").
+   - \`discountAmount\`: Extract the logical NUMERIC value representing the core discount (e.g., 100 for "100% off", 9000 for "₹9000 benefits"). Do not include currency symbols.
+   - \`discountType\`: Categorize strictly as "percent", "flat", or "cashback".
+   - \`minOrderAmount\` & \`maxDiscountCap\`: Extract as plain numbers if mentioned (e.g., "up to ₹120" -> maxDiscountCap: 120). Use null if missing.
+   - \`expiryDate\`: Parse any date format into "YYYY-MM-DD". If absent, use null.
+   - \`category\`: Classify into ["Food", "Grocery", "Shopping", "Ecommerce", "Payments", "Travel", "Entertainment", "Health", "Other"]. (Note: Credit Cards/Wallets = "Payments").
+   - \`packageName\`: Deduce the standard Android package name of the app if you are highly confident (e.g., "in.swiggy.android", "com.application.zomato"). Otherwise, use null.
+   - \`confidence\`: Provide a float between 0.0 and 1.0 indicating how confident you are in the extraction.
+
+4. **Rich Terms & Conditions**:
+   - \`termsAndConditions\` is critical. Use it to capture everything else: target platforms, applicability (e.g., "New users only"), joining fees, and multi-brand benefits. Do not leave valuable context behind.
+
+5. **Noise Immunity**:
+   - Ignore status bar text (e.g., "1:34", "4G", battery percentages).
+   - Ignore UI labels like "Sponsored", "Ad", "Details", "Know More".
+
+If a field cannot be determined with reasonable confidence, use null. Never guess missing values.
+
+### OUTPUT FORMAT:
+Return ONLY a valid JSON array matching the provided schema exactly.`;
 
 export interface GeminiParsedCoupon {
   couponCode:     string | null;
@@ -105,7 +123,10 @@ export async function extractCouponsFromOCR(rawOcrText: string, retryCount = 0):
       err?.status === 429 || err?.message?.includes('429') || 
       err?.status === 500 || err?.message?.includes('500') ||
       err?.status === 503 || err?.message?.includes('503') ||
-      err?.message?.includes('JSON_PARSE_ERROR');
+      err?.message?.includes('JSON_PARSE_ERROR') ||
+      err?.message?.includes('fetch failed') ||
+      err?.cause?.code === 'ECONNREFUSED' ||
+      err?.cause?.code === 'UND_ERR_CONNECT_TIMEOUT';
 
     if (isRetryable && retryCount < modelsToTry.length + 1) {
       const waitTime = Math.pow(2, retryCount) * 1000;
