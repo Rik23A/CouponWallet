@@ -13,6 +13,9 @@ import authRouter from './routes/auth';
 const app  = express();
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
 
+// Enable trust proxy for rate limiting behind a reverse proxy (Render, Nginx, etc.)
+app.set('trust proxy', 1);
+
 // ── Request Logger ────────────────────────────────────────────────────────────
 app.use((req: express.Request, _res: express.Response, next: express.NextFunction) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
