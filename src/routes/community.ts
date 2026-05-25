@@ -1,5 +1,6 @@
 // CouponVault Server — /api/community routes (MongoDB proxy)
 import { Router, Request, Response } from 'express';
+import { ObjectId } from 'mongodb';
 import { findMany, insertOne, upsertOne, incrementField, getDb } from '../lib/mongo';
 import { resolvePackageName } from '../lib/brandUtils';
 
@@ -111,6 +112,8 @@ router.post('/:id/vote', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    const objectId = ObjectId.isValid(id) ? new ObjectId(id) : id;
+
     // Record vote (upsert — one vote per user per coupon)
     await upsertOne(
       VOTES_COL,
@@ -120,7 +123,21 @@ router.post('/:id/vote', async (req: Request, res: Response): Promise<void> => {
 
     // Increment vote counter
     const field = vote === 'valid' ? 'valid_votes' : 'invalid_votes';
-    await incrementField(COUPONS_COL, { coupon_code: id }, field);
+    await incrementField(COUPONS_COL, { _id: objectId }, field);
+
+    // Recalculate trust_score
+    const coupon = await getDb().collection(COUPONS_COL).findOne({ _id: objectId as any });
+    if (coupon) {
+      const valid = (coupon.valid_votes || 0);
+      const invalid = (coupon.invalid_votes || 0);
+      const total = valid + invalid;
+      const trustScore = total > 0 ? valid / total : 0;
+      await getDb().collection(COUPONS_COL).updateOne(
+        { _id: objectId as any },
+        { $set: { trust_score: trustScore } }
+      );
+      console.log(`[Community] Vote recorded: ${vote} for coupon ${id}. New trust score: ${trustScore}`);
+    }
 
     res.json({ success: true });
   } catch (err) {
