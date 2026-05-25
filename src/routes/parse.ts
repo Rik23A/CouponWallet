@@ -152,6 +152,17 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
     const finalCoupons = Array.from(finalCouponsMap.values());
 
+    // Ensure every coupon has a valid fallback expiry date (10 days from today) if null/missing
+    const defaultExpiry = new Date();
+    defaultExpiry.setDate(defaultExpiry.getDate() + 10);
+    const defaultExpiryStr = defaultExpiry.toISOString().split('T')[0]; // "YYYY-MM-DD"
+
+    finalCoupons.forEach(c => {
+      if (!c.expiryDate || String(c.expiryDate).toLowerCase() === 'null') {
+        c.expiryDate = defaultExpiryStr;
+      }
+    });
+
     console.log(`[Parse] Returning ${finalCoupons.length} coupon(s): ${dbCoupons.length} from DB, ${validExtracted.length} from Gemini.`);
 
     res.json({
