@@ -23,11 +23,16 @@ function isValidE164Phone(phone: string): boolean {
 // Helper to standardise user objects in responses
 function makeUserResponse(user: any) {
   return {
-    id:       user._id,
-    email:    user.email,
-    username: user.username,
-    phone:    user.phone,
+    id:          user._id,
+    email:       user.email,
+    username:    user.username,
+    phone:       user.phone,
+    role:        user.role ?? 'user',
+    status:      user.status ?? 'active',
     is_verified: user.is_verified ?? false,
+    last_login_at: user.last_login_at ?? null,
+    login_count: user.login_count ?? 0,
+    created_at:  user.created_at,
   };
 }
 
@@ -82,10 +87,14 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
       username:                 cleanUsername,
       phone:                    cleanPhone,
       password:                 hashedPassword,
+      role:                     'user',
+      status:                   'active',
       is_verified:              false,
+      login_count:              0,
       verification_otp:         verificationOtp,
       verification_otp_expires: otpExpires,
       created_at:               new Date(),
+      last_active_at:           new Date(),
     });
 
     // 4. Send the verification code
@@ -106,7 +115,7 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
 // ── POST /api/auth/login ─────────────────────────────────────────────────────
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { email, password } = req.body;
+    const { email, password, platform, appVersion, deviceModel } = req.body;
     if (!email || !password) {
       res.status(400).json({ error: 'Email and password are required' });
       return;
@@ -118,6 +127,12 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
     const user = await db.collection(USERS_COL).findOne({ email: cleanEmail });
     if (!user) {
       res.status(401).json({ error: 'Invalid email or password' });
+      return;
+    }
+
+    // Account suspension check
+    if (user.status === 'suspended') {
+      res.status(403).json({ error: 'Your account has been suspended. Please contact administrator support.' });
       return;
     }
 
@@ -138,11 +153,57 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '180d' });
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const now = new Date();
+
+    // 1. Record login session in user_logins
+    await db.collection('user_logins').insertOne({
+      user_id:         user._id,
+      email:           user.email,
+      username:        user.username,
+      ip:              clientIp,
+      user_agent:      userAgent,
+      platform:        platform || 'mobile',
+      app_version:     appVersion || '1.0.0',
+      device_model:    deviceModel || 'Unknown Device',
+      login_at:        now,
+    });
+
+    // 2. Update user profile metrics
+    await db.collection(USERS_COL).updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          last_login_at:  now,
+          last_active_at: now,
+          last_ip:        clientIp,
+          last_platform:  platform || 'mobile',
+          app_version:    appVersion || user.app_version || '1.0.0',
+        },
+        $inc: { login_count: 1 },
+      }
+    );
+
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email,
+        role: user.role ?? 'user'
+      }, 
+      JWT_SECRET, 
+      { expiresIn: '180d' }
+    );
+
+    const updatedUser = {
+      ...user,
+      last_login_at: now,
+      login_count: (user.login_count ?? 0) + 1,
+    };
 
     res.json({
       token,
-      user: makeUserResponse(user),
+      user: makeUserResponse(updatedUser),
     });
   } catch (err) {
     console.error('[Auth] Login error:', err);
@@ -347,6 +408,91 @@ router.post('/reset-password', async (req: Request, res: Response): Promise<void
   } catch (err) {
     console.error('[Auth] Reset password error:', err);
     res.status(500).json({ error: 'Resetting password failed' });
+  }
+});
+
+// ── GET /api/auth/me ─────────────────────────────────────────────────────────
+router.get('/me', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string };
+
+    const db = getDb();
+    const { ObjectId } = await import('mongodb');
+    const user = await db.collection(USERS_COL).findOne({ _id: new ObjectId(decoded.id) });
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json({ user: makeUserResponse(user) });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+});
+
+// ── POST /api/auth/activity ──────────────────────────────────────────────────
+// Logs app usage/events (e.g. app_opened, coupon_saved, savings_recorded, ocr_scanned)
+router.post('/activity', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization;
+    let userId: string | null = null;
+    let email: string | null = null;
+
+    if (authHeader?.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string };
+        userId = decoded.id;
+        email = decoded.email;
+      } catch (_) {
+        // optional auth
+      }
+    }
+
+    const { action, metadata, clientTimestamp, platform } = req.body;
+    if (!action) {
+      res.status(400).json({ error: 'Action is required' });
+      return;
+    }
+
+    const db = getDb();
+    const now = new Date();
+
+    const activityDoc = {
+      user_id:   userId,
+      email:     email,
+      action:    action, // e.g. 'app_open', 'coupon_added', 'savings_recorded', 'ocr_scanned'
+      metadata:  metadata || {},
+      platform:  platform || 'mobile',
+      logged_at: now,
+      client_timestamp: clientTimestamp || now.toISOString(),
+    };
+
+    await db.collection('user_activity').insertOne(activityDoc);
+
+    if (userId) {
+      const { ObjectId } = await import('mongodb');
+      await db.collection(USERS_COL).updateOne(
+        { _id: new ObjectId(userId) },
+        { 
+          $set: { last_active_at: now },
+          $inc: { [`activity_counts.${action}`]: 1 }
+        }
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Auth] Activity log error:', err);
+    res.status(500).json({ error: 'Failed to log activity' });
   }
 });
 

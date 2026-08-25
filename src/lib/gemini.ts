@@ -86,7 +86,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function extractCouponsFromOCR(rawOcrText: string, retryCount = 0): Promise<GeminiParsedCoupon[]> {
   if (!ai) return [];
 
-  const modelsToTry = ['gemma-4-31b-it', 'gemini-3.1-flash-lite-preview'];
+  const modelsToTry = ['gemma-4-31b-it', 'gemini-3.1-flash-lite'];
   const currentModelName = modelsToTry[retryCount % modelsToTry.length];
 
   try {

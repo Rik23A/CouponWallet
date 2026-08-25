@@ -9,6 +9,7 @@ import parseRouter from './routes/parse';
 import communityRouter from './routes/community';
 import healthRouter from './routes/health';
 import authRouter from './routes/auth';
+import adminRouter from './routes/admin';
 
 const app  = express();
 const PORT = parseInt(process.env.PORT ?? '3000', 10);
@@ -28,7 +29,7 @@ app.use(helmet());
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '*').split(',').map(s => s.trim());
 app.use(cors({
   origin: allowedOrigins.includes('*') ? '*' : allowedOrigins,
-  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
 }));
 
@@ -48,6 +49,7 @@ app.use('/api/', limiter);
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/health',     healthRouter);
 app.use('/api/auth',       authRouter);
+app.use('/api/admin',      adminRouter);
 app.use('/api/parse',      parseRouter);
 app.use('/api/community',  communityRouter);
 
